@@ -7,6 +7,11 @@
 
 import SwiftUI
 import WebKit
+#if os(iOS)
+import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 
 #if os(iOS)
 public struct MarkdownLatexViewiOS: UIViewRepresentable, @preconcurrency MarkdownLatexViewShared {
@@ -271,35 +276,63 @@ private extension MarkdownLatexViewShared {
 }
 
 // Common Coordinator class
+struct HeightUpdateRegulator {
+    let minimumUpdateInterval: TimeInterval
+    private(set) var lastHeight: CGFloat = 0
+    private(set) var lastHeightUpdate: Date = .distantPast
+    private let decreaseEpsilon: CGFloat = 0.5
+
+    init(minimumUpdateInterval: TimeInterval) {
+        self.minimumUpdateInterval = minimumUpdateInterval
+    }
+
+    mutating func shouldApplyHeight(_ newHeight: CGFloat, at now: Date = Date()) -> Bool {
+        let clampedHeight = max(1, newHeight)
+        let isDecrease = clampedHeight + decreaseEpsilon < lastHeight
+        let canApplyByInterval = now.timeIntervalSince(lastHeightUpdate) >= minimumUpdateInterval
+
+        guard isDecrease || canApplyByInterval else {
+            return false
+        }
+
+        lastHeight = clampedHeight
+        lastHeightUpdate = now
+        return true
+    }
+}
+
 public class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
+    private let openExternalURL: @MainActor (URL) -> Void
+
     #if os(iOS)
     var parent: MarkdownLatexViewiOS
     
-    init(_ parent: MarkdownLatexViewiOS) {
+    init(_ parent: MarkdownLatexViewiOS, openExternalURL: @escaping @MainActor (URL) -> Void = Coordinator.defaultOpenExternalURL) {
         self.parent = parent
+        self.openExternalURL = openExternalURL
     }
     #else
     var parent: MarkdownLatexViewMacOS
     
-    init(_ parent: MarkdownLatexViewMacOS) {
+    init(_ parent: MarkdownLatexViewMacOS, openExternalURL: @escaping @MainActor (URL) -> Void = Coordinator.defaultOpenExternalURL) {
         self.parent = parent
+        self.openExternalURL = openExternalURL
     }
     #endif
     
     var lastContent: String = ""
-    private var lastHeightUpdate: Date = .distantPast
-    private let minimumUpdateInterval: TimeInterval = 0.1
+    private var heightUpdateRegulator = HeightUpdateRegulator(minimumUpdateInterval: 0.1)
     
     public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "heightUpdate" {
-            guard let height = message.body as? Double else { return }
-            
+            guard let height = message.body as? Double, height.isFinite else { return }
+            let normalizedHeight = max(1, CGFloat(height.rounded(.up)))
             let now = Date()
-            if now.timeIntervalSince(lastHeightUpdate) >= minimumUpdateInterval {
+
+            if heightUpdateRegulator.shouldApplyHeight(normalizedHeight, at: now) {
                 DispatchQueue.main.async {
-                    self.parent.height.wrappedValue = CGFloat(height)
+                    self.parent.height.wrappedValue = normalizedHeight
                 }
-                lastHeightUpdate = now
             }
         }
         if message.name == "log" {
@@ -320,33 +353,43 @@ public class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate
         }
     }
     
-    public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    @MainActor public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             webView.evaluateJavaScript("updateHeight();")
         }
     }
     
-    public func webView(_ webView: WKWebView,
-                        decidePolicyFor navigationAction: WKNavigationAction,
-                        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-
-        if let url = navigationAction.request.url,
-           navigationAction.navigationType == .linkActivated {
-            NSWorkspace.shared.open(url)
-            decisionHandler(.cancel)
-        } else {
-            decisionHandler(.allow)
+    @MainActor func navigationPolicy(for url: URL?, navigationType: WKNavigationType) -> WKNavigationActionPolicy {
+        guard let url, navigationType == .linkActivated else {
+            return .allow
         }
+
+        openExternalURL(url)
+        return .cancel
+    }
+
+    @MainActor public func webView(_ webView: WKWebView,
+                                   decidePolicyFor navigationAction: WKNavigationAction,
+                                   decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
+        decisionHandler(navigationPolicy(for: navigationAction.request.url, navigationType: navigationAction.navigationType))
     }
     
-    public func webView(_ webView: WKWebView,
-                        createWebViewWith configuration: WKWebViewConfiguration,
-                        for navigationAction: WKNavigationAction,
-                        windowFeatures: WKWindowFeatures) -> WKWebView? {
+    @MainActor public func webView(_ webView: WKWebView,
+                                   createWebViewWith configuration: WKWebViewConfiguration,
+                                   for navigationAction: WKNavigationAction,
+                                   windowFeatures: WKWindowFeatures) -> WKWebView? {
         if let url = navigationAction.request.url {
-            NSWorkspace.shared.open(url)
+            openExternalURL(url)
         }
         
         return nil
+    }
+
+    @MainActor private static func defaultOpenExternalURL(_ url: URL) {
+        #if os(iOS)
+        UIApplication.shared.open(url)
+        #elseif os(macOS)
+        NSWorkspace.shared.open(url)
+        #endif
     }
 }

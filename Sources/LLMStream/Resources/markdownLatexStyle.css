@@ -11,6 +11,11 @@ body {
     padding: var(--content-padding);
 }
 
+#content {
+    /* Prevent child margins from collapsing and skewing measured content height */
+    display: flow-root;
+}
+
 pre {
     background: transparent;
     color: var(--text-color);

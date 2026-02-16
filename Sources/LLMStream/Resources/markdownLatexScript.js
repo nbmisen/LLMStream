@@ -13,9 +13,20 @@ window.addEventListener('copy', function(e) {
 });
 
 function updateHeight() {
-    let height = document.documentElement.scrollHeight;
+    const content = document.getElementById("content");
+    const bodyStyles = window.getComputedStyle(document.body);
+    const bodyPaddingTop = parseFloat(bodyStyles.paddingTop) || 0;
+    const bodyPaddingBottom = parseFloat(bodyStyles.paddingBottom) || 0;
 
-    window.webkit.messageHandlers.heightUpdate.postMessage(height);
+    let contentHeight = 0;
+    if (content) {
+        const rectHeight = Math.ceil(content.getBoundingClientRect().height);
+        const scrollHeight = Math.ceil(content.scrollHeight || 0);
+        contentHeight = Math.max(rectHeight, scrollHeight);
+    }
+
+    const measuredHeight = Math.max(1, Math.ceil(contentHeight + bodyPaddingTop + bodyPaddingBottom));
+    window.webkit.messageHandlers.heightUpdate.postMessage(measuredHeight);
 }
 
 function log(message) {
